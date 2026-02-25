@@ -1,162 +1,115 @@
 import express from "express";
 import cors from "cors";
+import session from "express-session";
+import bcrypt from "bcrypt";
 import { pool } from "./db.js";
 
 const app = express();
-app.use(cors());
+
+// ✅ CORS: allow your frontend origin and cookies
+app.use(cors({
+  origin: "http://127.0.0.1:5500/frontend/", // replace with actual frontend origin
+  credentials: true
+}));
+
 app.use(express.json());
 
-// Utility: compute totals from rows
-function computeTotals(rows) {
-  let gross_sale = 0;
-  let total_investment = 0;
-  let total_profit = 0;
+// ✅ Session middleware
+app.use(session({
+  name: "daiho.sid",
+  secret: process.env.SESSION_SECRET || "change_this_secret",
+  resave: false,
+  saveUninitialized: false,
+  cookie: { httpOnly: true, maxAge: 24 * 60 * 60 * 1000 } // 1 day
+}));
 
-  rows.forEach(r => {
-    if (r.type === "SALE" && r.status === "ACTIVE") {
-      gross_sale += Number(r.total || 0);
-      total_investment += Number(r.qty || 0) * Number(r.investment || 0);
-      total_profit += Number(r.profit || 0);
-    }
-    if (r.type === "DATA" && r.status === "ACTIVE") {
-      gross_sale += Number(r.total || 0);
-    }
-  });
+// ✅ Auth routes
+app.post("/login", async (req, res) => {
+  const { username, password } = req.body;
+  const result = await pool.query("SELECT * FROM users WHERE username=$1", [username]);
+  if (result.rows.length === 0) return res.status(401).json({ error: "Invalid credentials" });
 
-  return { gross_sale, total_investment, total_profit };
+  const user = result.rows[0];
+  const match = await bcrypt.compare(password, user.password_hash);
+  if (!match) return res.status(401).json({ error: "Invalid credentials" });
+
+  req.session.user = { id: user.id, role: user.role };
+  res.json({ message: "Logged in", role: user.role });
+});
+
+app.post("/logout", (req, res) => {
+  req.session.destroy(() => res.json({ message: "Logged out" }));
+});
+
+app.get("/me", (req, res) => {
+  if (!req.session.user) return res.status(401).json({ error: "Not logged in" });
+  res.json(req.session.user);
+});
+
+// ✅ Protected middleware
+function requireAuth(req, res, next) {
+  if (!req.session.user) return res.status(401).json({ error: "Unauthorized" });
+  next();
 }
 
-// Health check
-app.get("/health", (req, res) => {
-  res.status(200).json({ ok: true, time: new Date().toISOString() });
-});
-
-// GET all sales for a date
-app.get("/sales", async (req, res) => {
+// ✅ Sales routes
+app.get("/sales", requireAuth, async (req, res) => {
   const { date } = req.query;
-  const { rows } = await pool.query(
-    "SELECT * FROM sales WHERE date=$1 ORDER BY id ASC",
+  const result = await pool.query("SELECT * FROM sales WHERE date=$1 ORDER BY id ASC", [date]);
+  const totals = await pool.query(
+    "SELECT SUM(total) AS gross_sale, SUM(investment) AS total_investment, SUM(profit) AS total_profit FROM sales WHERE date=$1",
     [date]
   );
-  const totals = computeTotals(rows);
-  res.json({ rows, totals });
+  res.json({ rows: result.rows, totals: totals.rows[0] });
 });
 
-// GET single sale by ID (needed for Edit modal)
-app.get("/sales/:id", async (req, res) => {
-  const { id } = req.params;
-  const { rows } = await pool.query("SELECT * FROM sales WHERE id=$1", [id]);
-  if (rows.length === 0) return res.status(404).json({ error: "Not found" });
-  res.json(rows[0]);
-});
-
-// POST new SALE or DATA
-app.post("/sales", async (req, res) => {
-  const { date, item, type } = req.body;
-
-  if (type === "SALE") {
-    const qty = Number(req.body.qty);
-    const investment = Number(req.body.investment);
-    const price = Number(req.body.price);
-
-    if (investment > price) {
-      return res.status(400).json({ error: "Investment must not exceed Price." });
-    }
-
-    const total = qty * price;
-    const profit = qty * (price - investment);
-
-    const q = `
-      INSERT INTO sales (date,type,item,qty,investment,price,total,profit,status)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'ACTIVE')
-      RETURNING *`;
-    const { rows } = await pool.query(q, [date, type, item, qty, investment, price, total, profit]);
-    return res.json(rows[0]);
-  }
-
-  if (type === "DATA") {
-    const total = Number(req.body.total);
-    const q = `
-      INSERT INTO sales (date,type,item,total,status)
-      VALUES ($1,$2,$3,$4,'ACTIVE')
-      RETURNING *`;
-    const { rows } = await pool.query(q, [date, type, item, total]);
-    return res.json(rows[0]);
-  }
-
-  res.status(400).json({ error: "Invalid type" });
-});
-
-// PUT edit SALE or DATA
-app.put("/sales/:id", async (req, res) => {
-  const { id } = req.params;
-  const { type, item, qty, investment, price, total } = req.body;
-
-  let q, params;
-
-  if (type === "SALE") {
-    const newTotal = qty * price;
-    const newProfit = qty * (price - investment);
-    q = "UPDATE sales SET item=$1, qty=$2, investment=$3, price=$4, total=$5, profit=$6 WHERE id=$7 RETURNING *";
-    params = [item, qty, investment, price, newTotal, newProfit, id];
-  } else if (type === "DATA") {
-    q = "UPDATE sales SET item=$1, total=$2 WHERE id=$3 RETURNING *";
-    params = [item, total, id];
-  } else {
-    return res.status(400).json({ error: "Invalid type" });
-  }
-
-  const { rows } = await pool.query(q, params);
-  if (rows.length === 0) return res.status(404).json({ error: "Not found" });
-  res.json(rows[0]);
-});
-
-// PUT toggle RETURNED status
-app.put("/sales/:id/toggle", async (req, res) => {
-  const { id } = req.params;
-  const { rows } = await pool.query("SELECT * FROM sales WHERE id=$1", [id]);
-  if (rows.length === 0) return res.status(404).json({ error: "Not found" });
-
-  const current = rows[0];
-  const nextStatus = current.status === "ACTIVE" ? "RETURNED" : "ACTIVE";
-  const { rows: updated } = await pool.query(
-    "UPDATE sales SET status=$1 WHERE id=$2 RETURNING *",
-    [nextStatus, id]
+app.post("/sales", requireAuth, async (req, res) => {
+  const { date, item, qty, investment, price, total, type } = req.body;
+  const profit = type === "SALE" ? (price * qty - investment * qty) : 0;
+  await pool.query(
+    "INSERT INTO sales(date,item,qty,investment,price,total,profit,type,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'ACTIVE')",
+    [date, item, qty || null, investment || null, price || null, total, profit, type]
   );
-  res.json(updated[0]);
+  res.json({ message: "Sale added" });
 });
 
-// DELETE sale
-app.delete("/sales/:id", async (req, res) => {
-  const { id } = req.params;
-  await pool.query("DELETE FROM sales WHERE id=$1", [id]);
-  res.json({ ok: true });
+app.get("/sales/:id", requireAuth, async (req, res) => {
+  const result = await pool.query("SELECT * FROM sales WHERE id=$1", [req.params.id]);
+  res.json(result.rows[0]);
 });
 
-// Export CSV
-app.get("/export", async (req, res) => {
+app.put("/sales/:id", requireAuth, async (req, res) => {
+  const { item, qty, investment, price, total, type } = req.body;
+  const profit = type === "SALE" ? (price * qty - investment * qty) : 0;
+  await pool.query(
+    "UPDATE sales SET item=$1, qty=$2, investment=$3, price=$4, total=$5, profit=$6, type=$7 WHERE id=$8",
+    [item, qty || null, investment || null, price || null, total, profit, type, req.params.id]
+  );
+  res.json({ message: "Sale updated" });
+});
+
+app.put("/sales/:id/toggle", requireAuth, async (req, res) => {
+  await pool.query("UPDATE sales SET status = CASE WHEN status='RETURNED' THEN 'ACTIVE' ELSE 'RETURNED' END WHERE id=$1", [req.params.id]);
+  res.json({ message: "Status toggled" });
+});
+
+app.delete("/sales/:id", requireAuth, async (req, res) => {
+  await pool.query("DELETE FROM sales WHERE id=$1", [req.params.id]);
+  res.json({ message: "Sale deleted" });
+});
+
+// ✅ Export CSV
+app.get("/export", requireAuth, async (req, res) => {
   const { date } = req.query;
-  const { rows } = await pool.query(
-    "SELECT * FROM sales WHERE date=$1 ORDER BY id ASC",
-    [date]
-  );
-
-  const header = ["Qty","Item","Investment","Price","Total","Profit","Type","Status"].join(",");
-  const lines = rows.map(r => {
-    const qty = r.type === "DATA" ? "N/A" : r.qty;
-    const inv = r.type === "DATA" ? "N/A" : r.investment;
-    const price = r.type === "DATA" ? "N/A" : r.price;
-    const profit = r.type === "DATA" ? "N/A" : r.profit;
-    return [qty, r.item, inv, price, r.total, profit, r.type, r.status].join(",");
+  const result = await pool.query("SELECT * FROM sales WHERE date=$1 ORDER BY id ASC", [date]);
+  let csv = "Qty,Item,Investment,Price,Total,Profit,Type,Status\n";
+  result.rows.forEach(r => {
+    csv += `${r.qty || ""},${r.item},${r.investment || ""},${r.price || ""},${r.total},${r.profit},${r.type},${r.status}\n`;
   });
-
-  const csv = [header, ...lines].join("\n");
-  res.setHeader("Content-Type", "text/csv");
-  res.setHeader("Content-Disposition", `attachment; filename="sales_${date}.csv"`);
+  res.header("Content-Type", "text/csv");
+  res.attachment(`sales_${date}.csv`);
   res.send(csv);
 });
 
-app.get("/", (req, res) => res.send("Sales backend OK"));
-
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`Server running on ${PORT}`));
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
