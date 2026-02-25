@@ -6,7 +6,7 @@ import bcrypt from "bcrypt";
 
 const app = express();
 app.use(cors({
-  origin: (origin, callback) => callback(null, origin),
+  origin: 'https://daiho.onrender.com',
   credentials: true
 }));
 
@@ -214,4 +214,5 @@ app.get("/",  (req, res) => res.send("Sales backend OK"));
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`Server running on ${PORT}`));
+
 
