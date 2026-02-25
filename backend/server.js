@@ -5,9 +5,8 @@ import session from "express-session";
 import bcrypt from "bcrypt";
 
 const app = express();
-// example: kung Live Server ang gamit mo
 app.use(cors({
-  origin: "http://127.0.0.1:5500",
+  origin: (origin, callback) => callback(null, origin),
   credentials: true
 }));
 
@@ -215,3 +214,4 @@ app.get("/",  (req, res) => res.send("Sales backend OK"));
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`Server running on ${PORT}`));
+
