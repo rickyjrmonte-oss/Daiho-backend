@@ -1,64 +1,10 @@
 import express from "express";
 import cors from "cors";
 import { pool } from "./db.js";
-import session from "express-session";
-import bcrypt from "bcrypt";
 
 const app = express();
-app.use(cors({
-  origin: 'https://daiho.onrender.com',
-  credentials: true
-}));
-
+app.use(cors());
 app.use(express.json());
-
-app.use(session({
-  name: "daiho.sid",
-  secret: process.env.SESSION_SECRET || "change_this_secret",
-  resave: false,
-  saveUninitialized: false,
-  cookie: { httpOnly: true, maxAge: 24 * 60 * 60 * 1000 } // 1 day
-}));
-
-// auth middleware
-function requireAuth(req, res, next) {
-  if (req.session && req.session.user && req.session.user.username === "admin") {
-    return next();
-  }
-  return res.status(401).json({ error: "Unauthorized" });
-}
-
-// optional: endpoint to check current session
-app.get("/me", (req, res) => {
-  if (req.session && req.session.user) return res.json({ user: req.session.user });
-  return res.status(401).json({ error: "Not authenticated" });
-});
-
-// login route
-app.post("/login", async (req, res) => {
-  const { username, password } = req.body;
-  if (!username || !password) return res.status(400).json({ error: "Missing credentials" });
-
-  const { rows } = await pool.query("SELECT * FROM users WHERE username=$1", [username]);
-  if (rows.length === 0) return res.status(401).json({ error: "Invalid credentials" });
-
-  const user = rows[0];
-  const ok = await bcrypt.compare(password, user.password_hash);
-  if (!ok) return res.status(401).json({ error: "Invalid credentials" });
-
-  // create session
-  req.session.user = { id: user.id, username: user.username, role: user.role };
-  res.json({ ok: true });
-});
-
-// logout route
-app.post("/logout", (req, res) => {
-  req.session.destroy(err => {
-    if (err) return res.status(500).json({ error: "Logout failed" });
-    res.clearCookie("daiho.sid");
-    res.json({ ok: true });
-  });
-});
 
 // Utility: compute totals from rows
 function computeTotals(rows) {
@@ -86,7 +32,7 @@ app.get("/health", (req, res) => {
 });
 
 // GET all sales for a date
-app.get("/sales", requireAuth, async (req, res) => {
+app.get("/sales", async (req, res) => {
   const { date } = req.query;
   const { rows } = await pool.query(
     "SELECT * FROM sales WHERE date=$1 ORDER BY id ASC",
@@ -97,7 +43,7 @@ app.get("/sales", requireAuth, async (req, res) => {
 });
 
 // GET single sale by ID (needed for Edit modal)
-app.get("/sales/:id", requireAuth, async (req, res) => {
+app.get("/sales/:id", async (req, res) => {
   const { id } = req.params;
   const { rows } = await pool.query("SELECT * FROM sales WHERE id=$1", [id]);
   if (rows.length === 0) return res.status(404).json({ error: "Not found" });
@@ -105,7 +51,7 @@ app.get("/sales/:id", requireAuth, async (req, res) => {
 });
 
 // POST new SALE or DATA
-app.post("/sales", requireAuth, async (req, res) => {
+app.post("/sales", async (req, res) => {
   const { date, item, type } = req.body;
 
   if (type === "SALE") {
@@ -142,7 +88,7 @@ app.post("/sales", requireAuth, async (req, res) => {
 });
 
 // PUT edit SALE or DATA
-app.put("/sales/:id", requireAuth, async (req, res) => {
+app.put("/sales/:id", async (req, res) => {
   const { id } = req.params;
   const { type, item, qty, investment, price, total } = req.body;
 
@@ -166,7 +112,7 @@ app.put("/sales/:id", requireAuth, async (req, res) => {
 });
 
 // PUT toggle RETURNED status
-app.put("/sales/:id/toggle", requireAuth, async (req, res) => {
+app.put("/sales/:id/toggle", async (req, res) => {
   const { id } = req.params;
   const { rows } = await pool.query("SELECT * FROM sales WHERE id=$1", [id]);
   if (rows.length === 0) return res.status(404).json({ error: "Not found" });
@@ -181,14 +127,14 @@ app.put("/sales/:id/toggle", requireAuth, async (req, res) => {
 });
 
 // DELETE sale
-app.delete("/sales/:id", requireAuth, async (req, res) => {
+app.delete("/sales/:id", async (req, res) => {
   const { id } = req.params;
   await pool.query("DELETE FROM sales WHERE id=$1", [id]);
   res.json({ ok: true });
 });
 
 // Export CSV
-app.get("/export", requireAuth, async (req, res) => {
+app.get("/export", async (req, res) => {
   const { date } = req.query;
   const { rows } = await pool.query(
     "SELECT * FROM sales WHERE date=$1 ORDER BY id ASC",
@@ -210,9 +156,7 @@ app.get("/export", requireAuth, async (req, res) => {
   res.send(csv);
 });
 
-app.get("/",  (req, res) => res.send("Sales backend OK"));
+app.get("/", (req, res) => res.send("Sales backend OK"));
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`Server running on ${PORT}`));
-
-
